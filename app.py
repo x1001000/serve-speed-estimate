@@ -264,4 +264,6 @@ with gr.Blocks(title="Volleyball Serve Speed Estimator", theme=gr.themes.Soft())
 
 
 if __name__ == "__main__":
-    demo.launch()
+    # ssr_mode=False avoids the "No API found" error some Gradio 5 SSR setups
+    # hit on Spaces (the UI renders but the client can't reach the API).
+    demo.launch(ssr_mode=False)
