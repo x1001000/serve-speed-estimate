@@ -42,6 +42,25 @@ from serve_speed.pipeline import run_pipeline
 from serve_speed.speed import Calibration
 from serve_speed.video import annotate_video, first_frame
 
+# Work around a gradio_client bug (present in the Gradio 5.9 line) where API
+# schema generation crashes on boolean JSON sub-schemas (e.g.
+# ``additionalProperties: true``) with "argument of type 'bool' is not
+# iterable". That crash makes every request to "/" 500 and the browser report
+# "No API found". Short-circuit boolean schemas so schema generation succeeds.
+try:
+    import gradio_client.utils as _gc_utils
+
+    _orig_schema_to_type = _gc_utils._json_schema_to_python_type
+
+    def _safe_schema_to_type(schema, defs=None):
+        if isinstance(schema, bool):
+            return "Any"
+        return _orig_schema_to_type(schema, defs)
+
+    _gc_utils._json_schema_to_python_type = _safe_schema_to_type
+except Exception:  # pragma: no cover - never block startup on the patch
+    pass
+
 # ZeroGPU allocates a GPU only for the duration of a decorated call. Video
 # detection/tracking is the GPU-heavy part, so we run just that under
 # @spaces.GPU; annotation/plotting stay on CPU outside it.
@@ -264,6 +283,4 @@ with gr.Blocks(title="Volleyball Serve Speed Estimator", theme=gr.themes.Soft())
 
 
 if __name__ == "__main__":
-    # ssr_mode=False avoids the "No API found" error some Gradio 5 SSR setups
-    # hit on Spaces (the UI renders but the client can't reach the API).
-    demo.launch(ssr_mode=False)
+    demo.launch()
