@@ -1,3 +1,4 @@
+spaces
 rfdetr
 trackers
 supervision>=0.25.0

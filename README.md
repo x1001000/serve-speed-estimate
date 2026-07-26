@@ -8,6 +8,7 @@ sdk_version: 5.9.0
 app_file: app.py
 pinned: false
 license: mit
+suggested_hardware: zero-a10g
 short_description: Estimate volleyball serve speed from a side-view court video
 ---
 
@@ -58,6 +59,14 @@ means the ball is nearer/farther than that plane at different times. So:
   best result.
 - Treat the number as a **good estimate**, not a radar-gun measurement.
 - Higher frame-rate clips and a larger RF-DETR model improve the estimate.
+
+## Hardware / ZeroGPU
+
+The GPU-heavy stage (ball detection + tracking) is wrapped in `@spaces.GPU`, so
+this Space runs well on **ZeroGPU** (`zero-a10g`), which needs a Hugging Face
+PRO account. Only that call allocates a GPU; annotation and plotting stay on
+CPU. Off a Space (local dev), `spaces` isn't required — the decorator falls back
+to a no-op and the app runs on whatever device torch finds.
 
 ## Running locally
 

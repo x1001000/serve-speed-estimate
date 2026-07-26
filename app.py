@@ -8,6 +8,28 @@ estimates the serve speed from the trajectory length and time.
 
 from __future__ import annotations
 
+# `spaces` must be imported before torch/CUDA is touched so that ZeroGPU can
+# patch things correctly. RF-DETR/torch are only imported lazily deep inside
+# the pipeline, so importing spaces first here is sufficient. When the package
+# isn't installed (e.g. local dev off Hugging Face), fall back to a no-op
+# decorator so the app still runs.
+try:
+    import spaces  # type: ignore
+except Exception:  # pragma: no cover - only when not on a Space
+
+    class _SpacesShim:
+        @staticmethod
+        def GPU(*args, **kwargs):
+            if args and callable(args[0]):
+                return args[0]
+
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+    spaces = _SpacesShim()  # type: ignore
+
 import logging
 import tempfile
 
@@ -19,6 +41,11 @@ from serve_speed.detector import available_models
 from serve_speed.pipeline import run_pipeline
 from serve_speed.speed import Calibration
 from serve_speed.video import annotate_video, first_frame
+
+# ZeroGPU allocates a GPU only for the duration of a decorated call. Video
+# detection/tracking is the GPU-heavy part, so we run just that under
+# @spaces.GPU; annotation/plotting stay on CPU outside it.
+GPU_DURATION_S = 120
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
@@ -99,6 +126,30 @@ def _speed_plot(estimate):
     return fig
 
 
+@spaces.GPU(duration=GPU_DURATION_S)
+def _detect_and_track(video_path, p1, p2, distance_m, model_name, threshold, stride, tracker_name):
+    """GPU-heavy stage: detect + track the ball and estimate the speed.
+
+    This is the only part that needs a GPU, so it is the only part wrapped in
+    ``@spaces.GPU``. ZeroGPU runs it in a separate process and serializes the
+    boundary, so it takes only simple, picklable arguments and returns a
+    ``PipelineResult`` (plain dataclasses / numpy arrays). Per-frame progress
+    can't cross that boundary, so the outer handler shows coarse progress.
+    """
+    calibration = Calibration(
+        p1=tuple(p1), p2=tuple(p2), real_distance_m=float(distance_m)
+    )
+    return run_pipeline(
+        video_path,
+        calibration=calibration,
+        model_name=model_name,
+        threshold=float(threshold),
+        stride=int(stride),
+        tracker_name=tracker_name,
+        progress=None,
+    )
+
+
 def estimate(video_path, frame_state, points, distance_m, model_name, threshold, stride, tracker_name, progress=gr.Progress()):
     if not video_path:
         raise gr.Error("Please upload or record a video first.")
@@ -109,19 +160,17 @@ def estimate(video_path, frame_state, points, distance_m, model_name, threshold,
 
     calibration = Calibration(p1=points[0], p2=points[1], real_distance_m=float(distance_m))
 
-    def _progress(frac, desc):
-        progress(frac, desc=desc)
-
-    progress(0.02, desc="Loading model…")
+    progress(0.05, desc="Allocating GPU · detecting & tracking ball…")
     try:
-        result = run_pipeline(
+        result = _detect_and_track(
             video_path,
-            calibration=calibration,
-            model_name=model_name,
-            threshold=float(threshold),
-            stride=int(stride),
-            tracker_name=tracker_name,
-            progress=_progress,
+            tuple(points[0]),
+            tuple(points[1]),
+            float(distance_m),
+            model_name,
+            float(threshold),
+            int(stride),
+            tracker_name,
         )
     except ValueError as exc:
         raise gr.Error(str(exc))
@@ -191,8 +240,8 @@ with gr.Blocks(title="Volleyball Serve Speed Estimator", theme=gr.themes.Soft())
         with gr.Column(scale=1):
             with gr.Accordion("Detection settings", open=False):
                 model_dd = gr.Dropdown(
-                    choices=available_models(), value="small", label="RF-DETR model",
-                    info="Smaller = faster (good on free CPU); larger = more accurate on a fast ball.",
+                    choices=available_models(), value="medium", label="RF-DETR model",
+                    info="Larger = more accurate on a fast ball. On ZeroGPU even 'large' is fast.",
                 )
                 threshold = gr.Slider(0.1, 0.9, value=0.4, step=0.05, label="Detection confidence")
                 stride = gr.Slider(1, 5, value=1, step=1, label="Frame stride",
