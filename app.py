@@ -191,8 +191,8 @@ with gr.Blocks(title="Volleyball Serve Speed Estimator", theme=gr.themes.Soft())
         with gr.Column(scale=1):
             with gr.Accordion("Detection settings", open=False):
                 model_dd = gr.Dropdown(
-                    choices=available_models(), value="medium", label="RF-DETR model",
-                    info="Smaller = faster; larger = more accurate on a fast ball.",
+                    choices=available_models(), value="small", label="RF-DETR model",
+                    info="Smaller = faster (good on free CPU); larger = more accurate on a fast ball.",
                 )
                 threshold = gr.Slider(0.1, 0.9, value=0.4, step=0.05, label="Detection confidence")
                 stride = gr.Slider(1, 5, value=1, step=1, label="Frame stride",
