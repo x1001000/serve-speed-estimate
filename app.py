@@ -243,6 +243,14 @@ with gr.Blocks(title="Volleyball Serve Speed Estimator", theme=gr.themes.Soft())
                 sources=["upload", "webcam"],
                 include_audio=False,
             )
+            gr.Examples(
+                examples=[
+                    ["examples/PXL_20260717_054002690_h264.mp4"],
+                    ["examples/POL.mp4"],
+                ],
+                inputs=[video_in],
+                label="Example serves (click to load, then calibrate)",
+            )
             load_btn = gr.Button("① Load frame for calibration", variant="secondary")
             calib_image = gr.Image(
                 label="② Click two ends of a known-distance line",
