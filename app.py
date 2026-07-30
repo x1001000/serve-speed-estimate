@@ -273,14 +273,14 @@ with gr.Blocks(title="Volleyball Serve Speed Estimator", theme=gr.themes.Soft())
         with gr.Column(scale=1):
             with gr.Accordion("Detection settings", open=False):
                 model_dd = gr.Dropdown(
-                    choices=available_models(), value="medium", label="RF-DETR model",
+                    choices=available_models(), value="large", label="RF-DETR model",
                     info="Larger = more accurate on a fast ball. On ZeroGPU even 'large' is fast.",
                 )
                 threshold = gr.Slider(0.1, 0.9, value=0.4, step=0.05, label="Detection confidence")
                 stride = gr.Slider(1, 5, value=1, step=1, label="Frame stride",
                                    info="Process every Nth frame. 1 = best time resolution.")
                 tracker_dd = gr.Dropdown(
-                    choices=["sort", "bytetrack", "ocsort"], value="sort", label="Tracker",
+                    choices=["sort", "bytetrack", "ocsort"], value="bytetrack", label="Tracker",
                 )
             estimate_btn = gr.Button("③ Estimate serve speed", variant="primary")
             report_md = gr.Markdown()

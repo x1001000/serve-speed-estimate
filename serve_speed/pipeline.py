@@ -34,10 +34,10 @@ class PipelineResult:
 def run_pipeline(
     video_path: str,
     calibration: Calibration,
-    model_name: str = "medium",
+    model_name: str = "large",
     threshold: float = 0.4,
     stride: int = 1,
-    tracker_name: str = "sort",
+    tracker_name: str = "bytetrack",
     progress: Optional[ProgressFn] = None,
 ) -> PipelineResult:
     """Detect and track the ball across the clip and estimate the serve speed."""

@@ -42,7 +42,7 @@ def available_models() -> list[str]:
 
 
 @lru_cache(maxsize=1)
-def get_detector(model_name: str = "medium", resolution: Optional[int] = None) -> "BallDetector":
+def get_detector(model_name: str = "large", resolution: Optional[int] = None) -> "BallDetector":
     """Return a process-wide cached detector for ``model_name``.
 
     ZeroGPU keeps the worker process warm between ``@spaces.GPU`` calls, so
@@ -94,7 +94,7 @@ class BallDetector:
     returned for the tracker, which speaks that format natively.
     """
 
-    def __init__(self, model_name: str = "medium", resolution: Optional[int] = None):
+    def __init__(self, model_name: str = "large", resolution: Optional[int] = None):
         if model_name not in _MODEL_CLASSES:
             raise ValueError(
                 f"Unknown model '{model_name}'. Choose one of {available_models()}."
