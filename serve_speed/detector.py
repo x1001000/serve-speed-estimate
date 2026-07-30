@@ -42,6 +42,20 @@ def available_models() -> list[str]:
 
 
 @lru_cache(maxsize=1)
+def get_detector(model_name: str = "medium", resolution: Optional[int] = None) -> "BallDetector":
+    """Return a process-wide cached detector for ``model_name``.
+
+    ZeroGPU keeps the worker process warm between ``@spaces.GPU`` calls, so
+    caching here means the RF-DETR weights are loaded (and moved to GPU) only
+    on the first call. Later calls reuse the same instance and skip the
+    multi-second warmup that would otherwise burn ZeroGPU quota. The cache
+    holds a single entry so switching model size evicts the previous weights
+    from GPU memory instead of pinning both.
+    """
+    return BallDetector(model_name=model_name, resolution=resolution)
+
+
+@lru_cache(maxsize=1)
 def _coco_classes() -> dict[int, str]:
     """Return an ``{id: name}`` map from whichever rfdetr module exposes it."""
     for path in (

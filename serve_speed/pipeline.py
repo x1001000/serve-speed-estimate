@@ -8,7 +8,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .detector import BallDetector
+from .detector import get_detector
 from .speed import Calibration, SpeedEstimate, estimate_speed
 from .tracking import (
     TrackPoint,
@@ -45,7 +45,7 @@ def run_pipeline(
     fps = info["fps"]
     total = max(1, info["frame_count"])
 
-    detector = BallDetector(model_name=model_name)
+    detector = get_detector(model_name=model_name)
     tracker = build_tracker(tracker_name)
 
     all_points: list[TrackPoint] = []

@@ -64,7 +64,13 @@ except Exception:  # pragma: no cover - never block startup on the patch
 # ZeroGPU allocates a GPU only for the duration of a decorated call. Video
 # detection/tracking is the GPU-heavy part, so we run just that under
 # @spaces.GPU; annotation/plotting stay on CPU outside it.
-GPU_DURATION_S = 120
+#
+# ``duration`` is the upfront budget requested from the ZeroGPU scheduler; the
+# actual quota charged is the real runtime. A smaller budget means we can
+# still fit under the remaining daily quota when it gets low, and the detector
+# is cached across calls (see ``get_detector``) so warm calls finish well
+# inside this window.
+GPU_DURATION_S = 60
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
