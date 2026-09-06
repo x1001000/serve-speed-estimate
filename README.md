@@ -8,7 +8,6 @@ sdk_version: 5.9.0
 app_file: app.py
 pinned: false
 license: mit
-suggested_hardware: zero-a10g
 short_description: Estimate volleyball serve speed from a side-view court video
 ---
 
@@ -18,69 +17,71 @@ A Gradio app (built for [Hugging Face Spaces](https://huggingface.co/spaces))
 that estimates a **volleyball serve's speed** from a video shot at the **side of
 the court** — the kind of full-court view you'd get filming from the sideline.
 
-The ball is detected with [RF-DETR](https://github.com/roboflow/rf-detr) and
-linked across frames into a trajectory with the
-[trackers](https://github.com/roboflow/trackers) library. Speed is then the
-trajectory's real-world length divided by its elapsed time.
+You **click the ball** once while it's in flight; a **click-seeded motion
+tracker** follows it forwards and backwards along its arc using frame-difference
+motion detection. Speed is then the trajectory's real-world length divided by
+its elapsed time. It runs on **CPU** — no GPU, no model download.
+
+### Why click-to-track instead of an object detector?
+
+In a wide full-court shot the ball can be only **~7 px across** and
+motion-blurred. A generic object detector (e.g. COCO "sports ball") misses it
+and fires on everything else round — players, a ball on the floor, wall pads —
+producing nonsense speeds. But a small fast ball *is* a bright **moving** blob,
+which frame-differencing spots reliably. The only ambiguity is *which* blob is
+the ball among all the moving people, and your single click resolves exactly
+that. A projectile motion model then carries the track across large per-frame
+jumps.
 
 ## How it works
 
 1. **Upload or webcam-record** a short clip of the serve.
-2. **Load a frame** and **click two points** a known real distance apart to
-   calibrate pixels → metres. The default reference is the **18 m court length**
-   (end line to end line along the near sideline), but any visible known
-   distance works (net height 2.43 m / 2.24 m, a 9 m sideline, etc.).
-3. **Estimate** — you get:
-   - **Peak speed** (fastest part of the flight, closest to the speed just after
-     contact) and **average flight speed**, in km/h and m/s,
-   - a **speed-over-time plot**, and
-   - an **annotated video** showing the ball box, its trajectory, and the
-     calibration line.
+2. **Calibrate:** on the calibration frame, **click two points** a known real
+   distance apart. The default reference is the **18 m court length** (end line
+   to end line), but any visible known distance works (net height 2.43 m / 2.24 m,
+   a 9 m sideline, etc.).
+3. **Mark the ball:** drag the **serve-frame slider** to a moment when the ball is
+   *in flight* and **click on the ball**. You don't need to be precise or catch the
+   exact contact frame — clicking anywhere on the visible flight works (the tracker
+   snaps to the nearest moving blob and walks the arc both directions).
+4. **Estimate** — you get **peak** and **average flight** speed (km/h + m/s), a
+   **speed-over-time plot**, and an **annotated video** of the tracked trajectory.
 
 ## The estimation model
 
-For a ball centre observed at pixel positions over time, and a calibration
-scale `metres_per_pixel = known_distance / pixel_distance`:
+The ball is followed by a **click-seeded motion-ballistic tracker**:
+
+- **Motion blobs** per frame come from three-frame differencing
+  (`|cur−prev| AND |next−cur|`) — a tiny fast ball is a bright *moving* blob.
+- Starting from your click, the tracker follows the blob nearest the **predicted**
+  next position (constant-velocity + gravity), so large per-frame jumps are fine.
+- It stops at end-of-flight (direction reversal / lost / impossible jump) and
+  trims the result to its clean **projectile** span (x ≈ linear in time,
+  y ≈ quadratic).
+
+Then, for the tracked centres and a calibration scale
+`metres_per_pixel = known_distance / pixel_distance`:
 
 ```
 segment_speed_i = distance(p_i, p_{i+1}) * metres_per_pixel / (t_{i+1} - t_i)
-peak_speed      = max( median_filtered(segment_speed) )
+peak_speed      = max( median_filtered(segment_speed) )   # capped at 45 m/s
 ```
-
-Detections are **not** trusted blindly. A generic COCO "sports ball" detector
-fires on many round things (players, a ball on the floor, wall pads), so the
-serve is isolated by **physical plausibility** rather than by picking the most
-confident or fastest-moving box:
-
-- links implying a speed above ~45 m/s (162 km/h) are cut — a ball can't teleport;
-- the remaining path must fit a **projectile** (horizontal ≈ linear in time,
-  vertical ≈ quadratic) with low residual;
-- if nothing qualifies, the app says so instead of reporting a nonsense number.
 
 ### Accuracy caveats
 
-This uses a **single scalar scale**, which is exact only for motion in the plane
-of the calibration line. A real serve arcs in 3D, and side-view perspective
-means the ball is nearer/farther than that plane at different times.
+This uses a **single scalar scale**, exact only for motion in the plane of the
+calibration line; a real serve arcs in 3D and side-view perspective shifts the
+ball off that plane. For the best results:
 
-**The biggest limiter is resolution.** In a wide full-court gym shot the ball can
-be only ~7 px across — too small for a generic detector to find reliably, so the
-trajectory comes out empty or noisy. For usable results:
-
-- Frame the serve so the **ball is at least ~20 px** (closer/zoomed camera, or a
-  higher-resolution recording).
-- Prefer a **higher frame rate** (60–120 fps): less motion blur, more points.
-- Trim the clip to just the serve so other motion can't distract the detector.
+- **Click the ball while it's clearly in flight** (mid-arc is ideal).
+- Prefer a **higher frame rate** (60–120 fps): less blur, more points.
 - Calibrate along the plane the ball actually travels in (near sideline).
 - Treat the number as a **good estimate**, not a radar-gun measurement.
 
-## Hardware / ZeroGPU
+## Hardware
 
-The GPU-heavy stage (ball detection + tracking) is wrapped in `@spaces.GPU`, so
-this Space runs well on **ZeroGPU** (`zero-a10g`), which needs a Hugging Face
-PRO account. Only that call allocates a GPU; annotation and plotting stay on
-CPU. Off a Space (local dev), `spaces` isn't required — the decorator falls back
-to a no-op and the app runs on whatever device torch finds.
+Runs on **CPU basic** (free) — frame-difference tracking is light; no GPU or
+model download.
 
 ## Running locally
 
@@ -89,18 +90,25 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Open the printed local URL. First run downloads the RF-DETR checkpoint.
+Open the printed local URL.
 
 ## Project layout
 
 ```
-app.py                  Gradio UI
+app.py                  Gradio UI (calibrate + click-the-ball)
 serve_speed/
-  detector.py           RF-DETR ball detection (resolves the COCO ball class)
-  tracking.py           trackers-based linking + serve-trajectory selection
+  motion_tracker.py     click-seeded frame-difference ball tracker
+  tracking.py           TrackPoint type
   speed.py              calibration + speed math
   video.py              frame IO and annotation
-  pipeline.py           video -> trajectory -> speed estimate
+  pipeline.py           click + video -> trajectory -> speed estimate
+tests/                  synthetic-video tracker tests
+```
+
+## Tests
+
+```bash
+PYTHONPATH=. python tests/test_tracker.py
 ```
 
 ## License

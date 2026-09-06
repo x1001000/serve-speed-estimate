@@ -37,6 +37,39 @@ def first_frame(path: str) -> np.ndarray:
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
+def frame_at(path: str, index: int) -> np.ndarray:
+    """Return frame ``index`` as an RGB numpy array (for the seed-click UI)."""
+    cap = cv2.VideoCapture(path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(index)))
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        raise ValueError(f"Could not read frame {index} from: {path}")
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+
+def read_gray_frames(path: str, max_frames: int = 1200) -> tuple[list[np.ndarray], float]:
+    """Read the whole clip as grayscale frames (for motion tracking).
+
+    Grayscale keeps memory modest (~0.5 MB/frame at 960x540). Returns
+    ``(frames, fps)``.
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video: {path}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    if fps <= 0:
+        fps = 30.0
+    frames: list[np.ndarray] = []
+    while len(frames) < max_frames:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+    cap.release()
+    return frames, fps
+
+
 def iter_frames(path: str, stride: int = 1) -> Iterator[tuple[int, np.ndarray]]:
     """Yield ``(frame_idx, rgb_frame)`` for every ``stride``-th frame."""
     cap = cv2.VideoCapture(path)

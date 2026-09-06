@@ -1,8 +1,3 @@
-spaces
-rfdetr
-trackers
-supervision>=0.25.0
 opencv-python-headless>=4.9.0
 numpy>=1.26
 matplotlib>=3.8
-pillow>=10.0

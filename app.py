@@ -1,34 +1,16 @@
 """Volleyball Serve Speed Estimator — Gradio app for Hugging Face Spaces.
 
-Upload (or webcam-record) a video shot from the *side* of a volleyball court,
-mark a segment of known real length (the 18 m court end-line to end-line, by
-default), and the app detects and tracks the ball with RF-DETR + trackers and
-estimates the serve speed from the trajectory length and time.
+Workflow:
+1. Upload or record a side-view clip of the serve.
+2. Calibrate: click two points a known distance apart (default 18 m court length).
+3. Scrub to a frame where the ball is in flight and click on the ball.
+4. A click-seeded motion tracker follows the ball and reports the serve speed.
+
+The ball is followed by frame-difference motion tracking (CPU, no model
+download), which handles a tiny/blurred ball that appearance detectors miss.
 """
 
 from __future__ import annotations
-
-# `spaces` must be imported before torch/CUDA is touched so that ZeroGPU can
-# patch things correctly. RF-DETR/torch are only imported lazily deep inside
-# the pipeline, so importing spaces first here is sufficient. When the package
-# isn't installed (e.g. local dev off Hugging Face), fall back to a no-op
-# decorator so the app still runs.
-try:
-    import spaces  # type: ignore
-except Exception:  # pragma: no cover - only when not on a Space
-
-    class _SpacesShim:
-        @staticmethod
-        def GPU(*args, **kwargs):
-            if args and callable(args[0]):
-                return args[0]
-
-            def decorator(fn):
-                return fn
-
-            return decorator
-
-    spaces = _SpacesShim()  # type: ignore
 
 import logging
 import tempfile
@@ -37,16 +19,13 @@ import cv2
 import gradio as gr
 import numpy as np
 
-from serve_speed.detector import available_models
 from serve_speed.pipeline import run_pipeline
 from serve_speed.speed import Calibration
-from serve_speed.video import annotate_video, first_frame
+from serve_speed.video import annotate_video, first_frame, frame_at, video_info
 
-# Work around a gradio_client bug (present in the Gradio 5.9 line) where API
-# schema generation crashes on boolean JSON sub-schemas (e.g.
-# ``additionalProperties: true``) with "argument of type 'bool' is not
-# iterable". That crash makes every request to "/" 500 and the browser report
-# "No API found". Short-circuit boolean schemas so schema generation succeeds.
+# Work around a gradio_client bug (Gradio 5.9 line) where API schema generation
+# crashes on boolean JSON sub-schemas ("argument of type 'bool' is not
+# iterable"), 500-ing every request and showing "No API found" in the browser.
 try:
     import gradio_client.utils as _gc_utils
 
@@ -58,19 +37,8 @@ try:
         return _orig_schema_to_type(schema, defs)
 
     _gc_utils._json_schema_to_python_type = _safe_schema_to_type
-except Exception:  # pragma: no cover - never block startup on the patch
+except Exception:  # pragma: no cover
     pass
-
-# ZeroGPU allocates a GPU only for the duration of a decorated call. Video
-# detection/tracking is the GPU-heavy part, so we run just that under
-# @spaces.GPU; annotation/plotting stay on CPU outside it.
-#
-# ``duration`` is the upfront budget requested from the ZeroGPU scheduler; the
-# actual quota charged is the real runtime. A smaller budget means we can
-# still fit under the remaining daily quota when it gets low, and the detector
-# is cached across calls (see ``get_detector``) so warm calls finish well
-# inside this window.
-GPU_DURATION_S = 60
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
@@ -80,57 +48,85 @@ DEFAULT_DISTANCE_M = 18.0  # volleyball court length, end line to end line
 INTRO = """
 # 🏐 Volleyball Serve Speed Estimator
 
-Estimate a serve's speed from a **side-view** court video.
+Estimate a serve's speed from a **side-view** court video — runs on CPU, no model download.
 
 **How it works**
-1. **Upload or record** a short clip of the serve (camera on the side, like a full-court view).
-2. Click **Load frame for calibration**, then **click two points** on that frame that are a known real distance apart — by default the **18 m court length** (end line to end line along the near sideline).
-3. Click **Estimate serve speed**.
+1. **Upload or record** a short clip of the serve (camera on the side).
+2. **Calibrate:** on the calibration frame, click the **two ends of a known distance** — by default the **18 m court length** (end line to end line).
+3. **Mark the ball:** drag the **serve-frame slider** to a moment when the ball is *in flight*, then **click on the ball**. You don't need to be precise or catch the exact contact frame — clicking anywhere on the visible flight works.
+4. Click **Estimate serve speed**.
 
-The ball is found with [RF-DETR](https://github.com/roboflow/rf-detr) and linked
-across frames with [trackers](https://github.com/roboflow/trackers); speed is the
-trajectory length in metres divided by its time.
+A motion tracker follows the ball forwards and backwards from your click along its
+flight path; speed is the trajectory length in metres divided by its time.
 
 > ⚠️ This is an **estimate**. A single side-view scale can't fully correct for
-> perspective/depth, so treat the number as a good ballpark, not a radar reading.
+> perspective/depth, so treat it as a good ballpark, not a radar reading.
 """
 
 
-def _draw_calibration(frame_rgb: np.ndarray, points: list) -> np.ndarray:
+def _draw_markers(frame_rgb, points, color, connect=False):
     img = frame_rgb.copy()
     for i, (x, y) in enumerate(points):
-        cv2.circle(img, (int(x), int(y)), 8, (255, 170, 0), -1)
-        cv2.putText(
-            img, str(i + 1), (int(x) + 10, int(y) - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 170, 0), 2, cv2.LINE_AA,
-        )
-    if len(points) == 2:
-        cv2.line(img, tuple(map(int, points[0])), tuple(map(int, points[1])), (255, 170, 0), 2)
+        cv2.circle(img, (int(x), int(y)), 8, color, 2)
+        cv2.circle(img, (int(x), int(y)), 2, color, -1)
+        cv2.putText(img, str(i + 1), (int(x) + 11, int(y) - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+    if connect and len(points) == 2:
+        cv2.line(img, tuple(map(int, points[0])), tuple(map(int, points[1])), color, 2)
     return img
 
 
-def load_frame(video_path):
+def init_video(video_path):
+    """When a video is set, load the calibration frame and the seed frame."""
     if not video_path:
-        raise gr.Error("Please upload or record a video first.")
-    frame = first_frame(video_path)
-    return frame, frame, [], "Frame loaded. Click the two ends of your known-distance line."
+        return (None, None, [], "Upload or record a video to begin.",
+                gr.update(maximum=1, value=0), None, None, None,
+                "Load a video, then scrub to the ball in flight.")
+    info = video_info(video_path)
+    n = max(1, info["frame_count"])
+    calib = first_frame(video_path)
+    # default the serve slider to the middle of the clip (serves are usually mid-clip)
+    mid = min(n - 1, n // 3)
+    serve = frame_at(video_path, mid)
+    return (
+        calib, calib, [], "Calibration frame loaded — click the two ends of your known-distance line.",
+        gr.update(maximum=max(1, n - 1), value=mid, step=1),
+        serve, serve, None,
+        "Scrub to a frame where the ball is in flight, then click on the ball.",
+    )
 
 
-def on_click(frame_state, points, evt: gr.SelectData):
-    if frame_state is None:
-        raise gr.Error("Load a frame for calibration first.")
+def on_calib_click(calib_frame, points, evt: gr.SelectData):
+    if calib_frame is None:
+        raise gr.Error("Load a video first.")
     x, y = evt.index[0], evt.index[1]
     if points is None or len(points) >= 2:
         points = [(x, y)]
     else:
         points = points + [(x, y)]
-    display = _draw_calibration(frame_state, points)
+    display = _draw_markers(calib_frame, points, (255, 170, 0), connect=True)
     if len(points) == 1:
-        status = "Point 1 set — now click the other end of the line."
+        status = "Point 1 set — click the other end of the line."
     else:
         px = float(np.hypot(points[1][0] - points[0][0], points[1][1] - points[0][1]))
-        status = f"Calibration line set ({px:.0f}px). Adjust by clicking again, or estimate."
+        status = f"Calibration line set ({px:.0f}px). Click again to redo."
     return display, points, status
+
+
+def on_serve_slider(video_path, idx):
+    if not video_path:
+        return None, None, None, "Load a video first."
+    frame = frame_at(video_path, int(idx))
+    return frame, frame, None, f"Frame {int(idx)} — click on the ball if it's in flight here."
+
+
+def on_seed_click(serve_frame, serve_idx, evt: gr.SelectData):
+    if serve_frame is None:
+        raise gr.Error("Load a video and pick a serve frame first.")
+    x, y = evt.index[0], evt.index[1]
+    seed = (int(serve_idx), float(x), float(y))
+    display = _draw_markers(serve_frame, [(x, y)], (0, 255, 0))
+    return display, seed, f"Ball marked at frame {int(serve_idx)} ({x}, {y}). Ready to estimate."
 
 
 def _speed_plot(estimate):
@@ -151,51 +147,26 @@ def _speed_plot(estimate):
     return fig
 
 
-@spaces.GPU(duration=GPU_DURATION_S)
-def _detect_and_track(video_path, p1, p2, distance_m, model_name, threshold, stride, tracker_name):
-    """GPU-heavy stage: detect + track the ball and estimate the speed.
-
-    This is the only part that needs a GPU, so it is the only part wrapped in
-    ``@spaces.GPU``. ZeroGPU runs it in a separate process and serializes the
-    boundary, so it takes only simple, picklable arguments and returns a
-    ``PipelineResult`` (plain dataclasses / numpy arrays). Per-frame progress
-    can't cross that boundary, so the outer handler shows coarse progress.
-    """
-    calibration = Calibration(
-        p1=tuple(p1), p2=tuple(p2), real_distance_m=float(distance_m)
-    )
-    return run_pipeline(
-        video_path,
-        calibration=calibration,
-        model_name=model_name,
-        threshold=float(threshold),
-        stride=int(stride),
-        tracker_name=tracker_name,
-        progress=None,
-    )
-
-
-def estimate(video_path, frame_state, points, distance_m, model_name, threshold, stride, tracker_name, progress=gr.Progress()):
+def estimate(video_path, calib_points, distance_m, seed, progress=gr.Progress()):
     if not video_path:
         raise gr.Error("Please upload or record a video first.")
-    if not points or len(points) != 2:
-        raise gr.Error("Mark exactly two calibration points on the loaded frame.")
+    if not calib_points or len(calib_points) != 2:
+        raise gr.Error("Mark the two calibration points on the calibration frame.")
     if not distance_m or distance_m <= 0:
         raise gr.Error("Enter a positive real distance for the calibration line.")
+    if not seed:
+        raise gr.Error("Click on the ball in a frame where it is in flight.")
 
-    calibration = Calibration(p1=points[0], p2=points[1], real_distance_m=float(distance_m))
+    calibration = Calibration(p1=calib_points[0], p2=calib_points[1], real_distance_m=float(distance_m))
+    seed_frame, sx, sy = seed
 
-    progress(0.05, desc="Allocating GPU · detecting & tracking ball…")
+    def _progress(frac, desc):
+        progress(frac, desc=desc)
+
     try:
-        result = _detect_and_track(
-            video_path,
-            tuple(points[0]),
-            tuple(points[1]),
-            float(distance_m),
-            model_name,
-            float(threshold),
-            int(stride),
-            tracker_name,
+        result = run_pipeline(
+            video_path, calibration=calibration,
+            seed_frame=seed_frame, seed_xy=(sx, sy), progress=_progress,
         )
     except ValueError as exc:
         raise gr.Error(str(exc))
@@ -206,16 +177,13 @@ def estimate(video_path, frame_state, points, distance_m, model_name, threshold,
         f"Average (flight): {est.avg_kmh:.1f} km/h"
     )
 
-    progress(0.97, desc="Rendering annotated video…")
+    progress(0.9, desc="Rendering annotated video…")
     out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
     traj = [(p.frame_idx, p.x, p.y) for p in result.trajectory]
     annotate_video(
-        video_path,
-        out_path,
-        ball_boxes=result.ball_boxes,
-        trajectory=traj,
-        calibration_pts=(points[0], points[1]),
-        speed_text=speed_text,
+        video_path, out_path,
+        ball_boxes=result.ball_boxes, trajectory=traj,
+        calibration_pts=(calib_points[0], calib_points[1]), speed_text=speed_text,
     )
 
     report = (
@@ -226,72 +194,60 @@ def estimate(video_path, frame_state, points, distance_m, model_name, threshold,
         f"| Average over flight | {est.avg_kmh:.1f} km/h ({est.avg_ms:.1f} m/s) |\n"
         f"| Trajectory length | {est.path_length_m:.2f} m |\n"
         f"| Flight time (tracked) | {est.duration_s:.2f} s |\n"
-        f"| Ball detections used | {est.n_points} |\n"
-        f"| Scale | {est.meters_per_pixel*100:.2f} cm/px "
-        f"(from {distance_m:.1f} m over {calibration.pixel_distance:.0f} px) |\n\n"
+        f"| Ball positions tracked | {est.n_points} |\n"
+        f"| Scale | {est.meters_per_pixel*100:.2f} cm/px |\n\n"
         f"_Peak speed is the fastest part of the flight — closest to the speed just "
         f"after contact._"
     )
-
     return out_path, report, _speed_plot(est)
 
 
 with gr.Blocks(title="Volleyball Serve Speed Estimator", theme=gr.themes.Soft()) as demo:
     gr.Markdown(INTRO)
 
-    frame_state = gr.State(None)
-    points_state = gr.State([])
+    calib_frame_state = gr.State(None)
+    calib_points_state = gr.State([])
+    serve_frame_state = gr.State(None)
+    seed_state = gr.State(None)
 
     with gr.Row():
         with gr.Column(scale=1):
             video_in = gr.Video(
                 label="Serve video (upload or record)",
-                sources=["upload", "webcam"],
-                include_audio=False,
+                sources=["upload", "webcam"], include_audio=False,
             )
-            gr.Examples(
-                examples=[
-                    ["examples/PXL_20260717_054002690_h264.mp4"],
-                    ["examples/POL.mp4"],
-                ],
-                inputs=[video_in],
-                label="Example serves (click to load, then calibrate)",
-            )
-            load_btn = gr.Button("① Load frame for calibration", variant="secondary")
-            calib_image = gr.Image(
-                label="② Click two ends of a known-distance line",
-                interactive=False,
-                type="numpy",
-            )
-            status = gr.Markdown("Upload a video and load a frame to begin.")
+            gr.Markdown("### ① Calibrate — click the two ends of a known distance")
+            calib_image = gr.Image(label="Calibration frame", interactive=False, type="numpy")
+            calib_status = gr.Markdown("Upload or record a video to begin.")
             distance = gr.Number(
-                value=DEFAULT_DISTANCE_M,
-                label="Real distance of the marked line (m)",
-                info="Court length end-to-end is 18 m. Use any known reference you can see.",
+                value=DEFAULT_DISTANCE_M, label="Real distance of the marked line (m)",
+                info="Court length end-to-end is 18 m. Any known visible distance works.",
             )
 
         with gr.Column(scale=1):
-            with gr.Accordion("Detection settings", open=False):
-                model_dd = gr.Dropdown(
-                    choices=available_models(), value="large", label="RF-DETR model",
-                    info="Larger = more accurate on a fast ball. On ZeroGPU even 'large' is fast.",
-                )
-                threshold = gr.Slider(0.1, 0.9, value=0.4, step=0.05, label="Detection confidence")
-                stride = gr.Slider(1, 5, value=1, step=1, label="Frame stride",
-                                   info="Process every Nth frame. 1 = best time resolution.")
-                tracker_dd = gr.Dropdown(
-                    choices=["ocsort", "bytetrack", "sort"], value="ocsort", label="Tracker",
-                )
+            gr.Markdown("### ② Mark the ball — scrub to it in flight, then click it")
+            serve_slider = gr.Slider(0, 1, value=0, step=1, label="Serve frame")
+            serve_image = gr.Image(label="Click on the ball", interactive=False, type="numpy")
+            seed_status = gr.Markdown("Load a video, then scrub to the ball in flight.")
             estimate_btn = gr.Button("③ Estimate serve speed", variant="primary")
             report_md = gr.Markdown()
             speed_fig = gr.Plot(label="Speed over trajectory")
             video_out = gr.Video(label="Annotated trajectory")
 
-    load_btn.click(load_frame, inputs=[video_in], outputs=[calib_image, frame_state, points_state, status])
-    calib_image.select(on_click, inputs=[frame_state, points_state], outputs=[calib_image, points_state, status])
+    video_in.change(
+        init_video, inputs=[video_in],
+        outputs=[calib_image, calib_frame_state, calib_points_state, calib_status,
+                 serve_slider, serve_image, serve_frame_state, seed_state, seed_status],
+    )
+    calib_image.select(on_calib_click, inputs=[calib_frame_state, calib_points_state],
+                       outputs=[calib_image, calib_points_state, calib_status])
+    serve_slider.change(on_serve_slider, inputs=[video_in, serve_slider],
+                        outputs=[serve_image, serve_frame_state, seed_state, seed_status])
+    serve_image.select(on_seed_click, inputs=[serve_frame_state, serve_slider],
+                       outputs=[serve_image, seed_state, seed_status])
     estimate_btn.click(
         estimate,
-        inputs=[video_in, frame_state, points_state, distance, model_dd, threshold, stride, tracker_dd],
+        inputs=[video_in, calib_points_state, distance, seed_state],
         outputs=[video_out, report_md, speed_fig],
     )
 
