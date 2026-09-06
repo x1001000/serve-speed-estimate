@@ -25,7 +25,8 @@ def _serve_xy(k):
     return x, y
 
 
-def _render(n=24, with_ball=True, seed=0):
+def _render(n=24, with_ball=True, seed=0, gap=None):
+    """Render frames; ``gap=(a,b)`` omits the ball on frames a..b (a dropout)."""
     rng = np.random.default_rng(seed)
     frames = []
     # a couple of slow distractor blobs
@@ -37,7 +38,7 @@ def _render(n=24, with_ball=True, seed=0):
         d2 += rng.normal(0, 1.5, 2)
         cv2.circle(img, tuple(d1.astype(int)), 4, 180, -1)
         cv2.circle(img, tuple(d2.astype(int)), 5, 160, -1)
-        if with_ball:
+        if with_ball and not (gap and gap[0] <= k <= gap[1]):
             x, y = _serve_xy(k)
             cv2.circle(img, (int(x), int(y)), 3, 235, -1)
         frames.append(img)
@@ -54,6 +55,19 @@ def test_tracks_ball_and_estimates_speed():
     assert 60 < est.peak_kmh < 90, est.peak_kmh  # synthetic serve ≈ 72 km/h
 
 
+def test_bridges_ball_dropout():
+    # Ball vanishes for 6 frames mid-flight (as at a real apex). The tracker
+    # must coast across the gap and still recover the full arc + speed, even
+    # when the click lands just before the gap.
+    frames = _render(n=30, gap=(9, 14))
+    x, y = _serve_xy(7)
+    pts = track_serve(frames, seed_frame=7, seed_xy=(x, y), fps=FPS, meters_per_pixel=MPP)
+    spanned = [p.frame_idx for p in pts]
+    assert min(spanned) <= 6 and max(spanned) >= 18, spanned  # crossed the gap
+    est = estimate_speed(pts, CALIB)
+    assert 60 < est.peak_kmh < 90, est.peak_kmh
+
+
 def test_no_ball_no_track():
     frames = _render(with_ball=False)
     pts = track_serve(frames, seed_frame=5, seed_xy=(210, 230), fps=FPS, meters_per_pixel=MPP)
@@ -65,5 +79,6 @@ def test_no_ball_no_track():
 
 if __name__ == "__main__":
     test_tracks_ball_and_estimates_speed()
+    test_bridges_ball_dropout()
     test_no_ball_no_track()
     print("ALL TESTS PASS")

@@ -58,18 +58,6 @@ class SpeedEstimate:
         return self.avg_ms * 3.6
 
 
-def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
-    if window <= 1 or len(values) < window:
-        return values
-    # Pad with edge values (not zeros) so the endpoints aren't dragged toward 0,
-    # which would create large artificial jumps at the start/end of the path.
-    half_lo = (window - 1) // 2
-    half_hi = window // 2
-    padded = np.pad(values, (half_lo, half_hi), mode="edge")
-    kernel = np.ones(window) / window
-    return np.convolve(padded, kernel, mode="valid")
-
-
 def _median_filter(values: np.ndarray, window: int = 3) -> np.ndarray:
     if window <= 1 or len(values) < window:
         return values
@@ -83,7 +71,6 @@ def _median_filter(values: np.ndarray, window: int = 3) -> np.ndarray:
 def estimate_speed(
     points: list[TrackPoint],
     calibration: Calibration,
-    smooth_window: int = 3,
     max_speed_ms: float = 45.0,
 ) -> SpeedEstimate:
     """Estimate serve speed from an ordered ball trajectory.
@@ -105,41 +92,43 @@ def estimate_speed(
     y = np.array([p.y for p in points], dtype=float)
     traj_px = np.column_stack([x, y])
 
-    xs = _moving_average(x, smooth_window)
-    ys = _moving_average(y, smooth_window)
-
+    # Speeds from *raw* positions. Do NOT smooth positions here: the samples are
+    # non-uniform in time (the ball's blob drops out for several frames at the
+    # apex / low-contrast background), and index-based smoothing would blend
+    # points across those gaps and manufacture huge fake speeds. Each segment
+    # speed is dist/dt, which already handles uneven gaps correctly.
     dt = np.diff(t)
     valid = dt > 1e-6
-    dx = np.diff(xs)[valid]
-    dy = np.diff(ys)[valid]
+    dx = np.diff(x)[valid]
+    dy = np.diff(y)[valid]
     dt = dt[valid]
     seg_mid_t = ((t[:-1] + t[1:]) / 2.0)[valid]
 
     if len(dt) == 0:
         raise ValueError("Trajectory has no usable time gaps between detections.")
 
-    seg_dist_m = np.hypot(dx, dy) * mpp
-    seg_speed = seg_dist_m / dt
+    seg_speed = np.hypot(dx, dy) * mpp / dt
+    # De-jitter the *speed* series (centroid noise of a few px/frame), not the
+    # positions.
     seg_speed_f = _median_filter(seg_speed, window=3)
 
     # Defensive cap: no volleyball serve exceeds ~45 m/s (162 km/h; the men's
-    # record is ~37 m/s). Anything above that is a detection jump, not the
-    # ball, so ignore those segments when picking the peak.
+    # record is ~37 m/s). Anything above that is a detection jump, not the ball.
     plausible = seg_speed_f[seg_speed_f <= max_speed_ms]
     if plausible.size == 0:
         raise ValueError(
-            "Every tracked segment implies an impossible speed — the detections "
-            "are jumping between objects rather than following the ball. Try a "
-            "closer/zoomed clip or a higher frame rate."
+            "Every tracked segment implies an impossible speed — the track is "
+            "jumping between objects rather than following the ball. Click "
+            "directly on the ball while it is clearly in flight."
         )
 
-    peak = float(np.max(plausible))
-    # Average over the "flight" portion: plausible segments at least half the
-    # peak speed.
+    # Robust peak: 90th percentile of plausible segments (ignores a lone noisy
+    # frame) — closest to the true speed just after contact.
+    peak = float(np.percentile(plausible, 90))
     flight_mask = (seg_speed_f >= 0.5 * peak) & (seg_speed_f <= max_speed_ms)
     avg = float(np.mean(seg_speed_f[flight_mask])) if flight_mask.any() else float(np.mean(plausible))
 
-    path_length_m = float(np.sum(np.hypot(np.diff(xs), np.diff(ys)) * mpp))
+    path_length_m = float(np.sum(np.hypot(dx, dy) * mpp))
     duration = float(t[-1] - t[0])
 
     return SpeedEstimate(
