@@ -280,7 +280,7 @@ with gr.Blocks(title="Volleyball Serve Speed Estimator", theme=gr.themes.Soft())
                 stride = gr.Slider(1, 5, value=1, step=1, label="Frame stride",
                                    info="Process every Nth frame. 1 = best time resolution.")
                 tracker_dd = gr.Dropdown(
-                    choices=["sort", "bytetrack", "ocsort"], value="bytetrack", label="Tracker",
+                    choices=["ocsort", "bytetrack", "sort"], value="ocsort", label="Tracker",
                 )
             estimate_btn = gr.Button("③ Estimate serve speed", variant="primary")
             report_md = gr.Markdown()

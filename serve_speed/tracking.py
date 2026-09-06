@@ -34,7 +34,7 @@ class TrackPoint:
     conf: float
 
 
-def build_tracker(name: str = "bytetrack"):
+def build_tracker(name: str = "ocsort"):
     """Instantiate a tracker from the ``trackers`` package.
 
     Falls back gracefully to whatever tracker class is importable so the app

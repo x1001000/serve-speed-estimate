@@ -37,7 +37,7 @@ def run_pipeline(
     model_name: str = "large",
     threshold: float = 0.4,
     stride: int = 1,
-    tracker_name: str = "bytetrack",
+    tracker_name: str = "ocsort",
     progress: Optional[ProgressFn] = None,
 ) -> PipelineResult:
     """Detect and track the ball across the clip and estimate the serve speed."""
