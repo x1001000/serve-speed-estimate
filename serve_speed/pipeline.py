@@ -58,30 +58,38 @@ def run_pipeline(
 
         boxes, detections = detector.detect(frame, threshold=threshold)
 
-        # Feed *only* the single best ball detection to the tracker: on a
-        # side-view court there is one ball, and this keeps the trajectory
-        # clean and cheap.
-        if len(detections) > 1:
-            detections = detections[:1]
-
+        # Feed *all* ball detections to the tracker so it can form proper
+        # tracks; the serve is then isolated by physical plausibility, not by
+        # blindly trusting the single most confident box (which jumps between
+        # players, a ball on the floor, wall pads, etc.).
         tracked = tracker.update(detections)
         t = frame_idx / fps
-        pts = detections_to_points(tracked, frame_idx, t)
-        all_points.extend(pts)
-
-        if len(boxes) > 0:
-            x1, y1, x2, y2, _ = boxes[0]
-            ball_boxes[frame_idx] = (float(x1), float(y1), float(x2), float(y2))
+        all_points.extend(detections_to_points(tracked, frame_idx, t))
 
     if progress is not None:
         progress(0.96, "Estimating speed…")
 
-    trajectory = select_serve_trajectory(all_points)
-    estimate = estimate_speed(trajectory, calibration)
+    trajectory = select_serve_trajectory(
+        all_points, fps=fps, meters_per_pixel=calibration.meters_per_pixel
+    )
+    if len(trajectory) < 2:
+        raise ValueError(
+            "Couldn't isolate a clean serve trajectory. The ball is likely too "
+            "small/blurred to detect reliably at this camera distance, or the "
+            "clip has too much other motion. Try a closer or zoomed-in view "
+            "(ball at least ~20 px), a higher frame rate, or trim the clip to "
+            "just the serve."
+        )
 
-    # Keep only ball boxes that belong to the selected trajectory frames.
-    traj_frames = {p.frame_idx for p in trajectory}
-    ball_boxes = {k: v for k, v in ball_boxes.items() if k in traj_frames}
+    # Reconstruct small ball boxes at the chosen trajectory points for overlay
+    # (a volleyball is ~0.21 m across).
+    radius_px = max(3.0, 0.105 / calibration.meters_per_pixel)
+    for p in trajectory:
+        ball_boxes[p.frame_idx] = (
+            p.x - radius_px, p.y - radius_px, p.x + radius_px, p.y + radius_px,
+        )
+
+    estimate = estimate_speed(trajectory, calibration)
 
     return PipelineResult(
         estimate=estimate,

@@ -47,18 +47,32 @@ segment_speed_i = distance(p_i, p_{i+1}) * metres_per_pixel / (t_{i+1} - t_i)
 peak_speed      = max( median_filtered(segment_speed) )
 ```
 
-The trajectory is smoothed and outlier-filtered before the peak is taken.
+Detections are **not** trusted blindly. A generic COCO "sports ball" detector
+fires on many round things (players, a ball on the floor, wall pads), so the
+serve is isolated by **physical plausibility** rather than by picking the most
+confident or fastest-moving box:
+
+- links implying a speed above ~45 m/s (162 km/h) are cut — a ball can't teleport;
+- the remaining path must fit a **projectile** (horizontal ≈ linear in time,
+  vertical ≈ quadratic) with low residual;
+- if nothing qualifies, the app says so instead of reporting a nonsense number.
 
 ### Accuracy caveats
 
 This uses a **single scalar scale**, which is exact only for motion in the plane
 of the calibration line. A real serve arcs in 3D, and side-view perspective
-means the ball is nearer/farther than that plane at different times. So:
+means the ball is nearer/farther than that plane at different times.
 
-- Calibrate along the plane the ball actually travels in (near sideline) for the
-  best result.
+**The biggest limiter is resolution.** In a wide full-court gym shot the ball can
+be only ~7 px across — too small for a generic detector to find reliably, so the
+trajectory comes out empty or noisy. For usable results:
+
+- Frame the serve so the **ball is at least ~20 px** (closer/zoomed camera, or a
+  higher-resolution recording).
+- Prefer a **higher frame rate** (60–120 fps): less motion blur, more points.
+- Trim the clip to just the serve so other motion can't distract the detector.
+- Calibrate along the plane the ball actually travels in (near sideline).
 - Treat the number as a **good estimate**, not a radar-gun measurement.
-- Higher frame-rate clips and a larger RF-DETR model improve the estimate.
 
 ## Hardware / ZeroGPU
 

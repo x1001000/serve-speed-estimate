@@ -84,6 +84,7 @@ def estimate_speed(
     points: list[TrackPoint],
     calibration: Calibration,
     smooth_window: int = 3,
+    max_speed_ms: float = 45.0,
 ) -> SpeedEstimate:
     """Estimate serve speed from an ordered ball trajectory.
 
@@ -121,10 +122,22 @@ def estimate_speed(
     seg_speed = seg_dist_m / dt
     seg_speed_f = _median_filter(seg_speed, window=3)
 
-    peak = float(np.max(seg_speed_f))
-    # Average over the "flight" portion: segments at least half the peak speed.
-    flight_mask = seg_speed_f >= 0.5 * peak
-    avg = float(np.mean(seg_speed_f[flight_mask])) if flight_mask.any() else float(np.mean(seg_speed_f))
+    # Defensive cap: no volleyball serve exceeds ~45 m/s (162 km/h; the men's
+    # record is ~37 m/s). Anything above that is a detection jump, not the
+    # ball, so ignore those segments when picking the peak.
+    plausible = seg_speed_f[seg_speed_f <= max_speed_ms]
+    if plausible.size == 0:
+        raise ValueError(
+            "Every tracked segment implies an impossible speed — the detections "
+            "are jumping between objects rather than following the ball. Try a "
+            "closer/zoomed clip or a higher frame rate."
+        )
+
+    peak = float(np.max(plausible))
+    # Average over the "flight" portion: plausible segments at least half the
+    # peak speed.
+    flight_mask = (seg_speed_f >= 0.5 * peak) & (seg_speed_f <= max_speed_ms)
+    avg = float(np.mean(seg_speed_f[flight_mask])) if flight_mask.any() else float(np.mean(plausible))
 
     path_length_m = float(np.sum(np.hypot(np.diff(xs), np.diff(ys)) * mpp))
     duration = float(t[-1] - t[0])

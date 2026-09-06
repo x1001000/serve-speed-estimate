@@ -75,33 +75,97 @@ def detections_to_points(detections, frame_idx: int, t: float) -> list[TrackPoin
     return points
 
 
-def select_serve_trajectory(
-    points: list[TrackPoint], min_points: int = 4
-) -> list[TrackPoint]:
-    """Pick the single track that best represents the serve.
+def _fit_ballistic(track: list[TrackPoint]) -> float:
+    """RMS residual (px) of a projectile fit: x linear, y quadratic vs frame.
 
-    The serve is the fastest, longest-travelling ball motion in the clip, so
-    we score each track by the total pixel distance its centre travels and
-    return the winner's points ordered in time.
+    A real serve is a projectile — horizontal position is ~linear in time and
+    vertical position is ~quadratic (gravity). Clutter (players, a ball on the
+    floor, wall pads jumped between by the detector) does not fit this model,
+    so a low residual is a strong "this is really the ball" signal.
     """
-    if not points:
+    f = np.array([p.frame_idx for p in track], dtype=float)
+    x = np.array([p.x for p in track], dtype=float)
+    y = np.array([p.y for p in track], dtype=float)
+    f0 = f - f.mean()  # centre for numerical stability
+    xr = x - np.polyval(np.polyfit(f0, x, 1), f0)
+    yr = y - np.polyval(np.polyfit(f0, y, 2), f0)
+    return float(np.sqrt(np.mean(xr**2 + yr**2)))
+
+
+def _split_by_motion(
+    track: list[TrackPoint],
+    fps: float,
+    meters_per_pixel: float,
+    max_speed_ms: float,
+    max_gap_s: float,
+) -> list[list[TrackPoint]]:
+    """Split a time-sorted track wherever a link is physically impossible.
+
+    A ball cannot teleport: any consecutive pair implying a speed above
+    ``max_speed_ms`` (or separated by more than ``max_gap_s``) is a detection
+    jump/ID-switch, so we cut there. A zig-zag "track" collapses into a bunch
+    of tiny fragments that are then rejected for being too short.
+    """
+    track = sorted(track, key=lambda p: p.frame_idx)
+    segments: list[list[TrackPoint]] = []
+    current = [track[0]]
+    for a, b in zip(track, track[1:]):
+        dt = (b.frame_idx - a.frame_idx) / fps
+        if dt <= 0:
+            continue
+        speed = float(np.hypot(b.x - a.x, b.y - a.y)) * meters_per_pixel / dt
+        if dt > max_gap_s or speed > max_speed_ms:
+            segments.append(current)
+            current = [b]
+        else:
+            current.append(b)
+    segments.append(current)
+    return segments
+
+
+def select_serve_trajectory(
+    points: list[TrackPoint],
+    fps: float,
+    meters_per_pixel: float,
+    max_speed_ms: float = 45.0,
+    min_points: int = 5,
+    max_gap_s: float = 0.34,
+    max_residual_px: float = 12.0,
+    min_horizontal_m: float = 1.0,
+) -> list[TrackPoint]:
+    """Extract the single ball trajectory that actually looks like a serve.
+
+    Unlike a naive "longest travel" pick (which rewards zig-zagging noise),
+    this keeps only trajectory pieces that are *physically plausible*: bounded
+    frame-to-frame speed, a good projectile fit, and real horizontal travel.
+    Returns ``[]`` when nothing qualifies, so the caller can report low
+    confidence rather than emit a nonsense number.
+    """
+    if not points or fps <= 0 or meters_per_pixel <= 0:
         return []
 
     by_track: dict[int, list[TrackPoint]] = {}
     for p in points:
         by_track.setdefault(p.tracker_id, []).append(p)
 
-    def travel(track: list[TrackPoint]) -> float:
-        track = sorted(track, key=lambda p: p.frame_idx)
-        d = 0.0
-        for a, b in zip(track, track[1:]):
-            d += float(np.hypot(b.x - a.x, b.y - a.y))
-        return d
+    scored: list[tuple[float, list[TrackPoint]]] = []
+    for track in by_track.values():
+        for seg in _split_by_motion(track, fps, meters_per_pixel, max_speed_ms, max_gap_s):
+            if len(seg) < min_points:
+                continue
+            horizontal_m = abs(seg[-1].x - seg[0].x) * meters_per_pixel
+            if horizontal_m < min_horizontal_m:
+                continue  # a serve crosses the court; near-stationary blobs don't
+            residual = _fit_ballistic(seg)
+            if residual > max_residual_px:
+                continue  # doesn't follow a projectile path -> not the ball
+            frames = [p.frame_idx for p in seg]
+            span = max(frames) - min(frames)
+            # Prefer more points and longer span, penalise a poor fit.
+            score = len(seg) + 0.05 * span - 0.1 * residual
+            scored.append((score, seg))
 
-    candidates = [t for t in by_track.values() if len(t) >= min_points]
-    if not candidates:
-        # Fall back to the longest available track even if short.
-        candidates = [max(by_track.values(), key=len)]
-
-    best = max(candidates, key=travel)
-    return sorted(best, key=lambda p: p.frame_idx)
+    if not scored:
+        return []
+    scored.sort(key=lambda s: s[0], reverse=True)
+    return sorted(scored[0][1], key=lambda p: p.frame_idx)
