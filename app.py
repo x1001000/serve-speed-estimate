@@ -216,6 +216,11 @@ with gr.Blocks(title="Volleyball Serve Speed Estimator", theme=gr.themes.Soft())
                 label="Serve video (upload or record)",
                 sources=["upload", "webcam"], include_audio=False,
             )
+            gr.Examples(
+                examples=[["examples/PXL_20260717_054002690_h264.mp4"]],
+                inputs=[video_in],
+                label="Example serve (click to load, then calibrate & mark the ball)",
+            )
             gr.Markdown("### ① Calibrate — click the two ends of a known distance")
             calib_image = gr.Image(label="Calibration frame", interactive=False, type="numpy")
             calib_status = gr.Markdown("Upload or record a video to begin.")
